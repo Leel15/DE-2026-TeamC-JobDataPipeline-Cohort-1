@@ -14,10 +14,9 @@ Job-Data-Pipeline/
 │   └── jsearch.py                     
 ├── Transformation/                     <-- Standardization, cleaning, and transformation pipelines
 ├── data/                               <-- Medallion architecture storage layers (Bronze, Silver, Gold)
-│   ├── Curated/                        <-- Gold layer for analytics-ready datasets, aggregates & metrics
-│   ├── Processed/                      <-- Silver layer for cleaned, deduplicated & standardized files
-│   └── raw/                            <-- Bronze layer for raw, untransformed scraper and API dumps
-├── utils/                              <-- Shared utility modules and helper functions
+│   ├── MARTS/                        <-- Gold layer for analytics-ready datasets, aggregates & metrics
+│   ├── STAGING/                      <-- Silver layer for cleaned, deduplicated & standardized files
+│   └── RAW/                            <-- Bronze layer for raw, untransformed scraper and API dumps
 ├── .env.example                        <-- Template file outlining required environment variables
 ├── .gitignore                         
 └── README.md                           <-- Project documentation and setup guide                            
@@ -37,15 +36,15 @@ We identified and integrated 5 primary data sources covering the Saudi job marke
 
 | Source | URL/Identifier | Collection Method | Format | Records Extracted |
 |:---:|:---:|:---:|:---:|:---:|
-| **Tanqeeb** | https://saudi.tanqeeb.com | Web Scraping | JSON | **108** 📦 |
-| **JSearch** | https://rapidapi.com/letscrape | API with Key | JSON | **206** 📦 |
+| **Tanqeeb** | https://saudi.tanqeeb.com | Web Scraping | JSON | **106** 📦 |
+| **JSearch** | https://rapidapi.com/letscrape | API with Key | JSON | **301** 📦 |
 | **FreeHire** | https://freehire.me/jobs | Direct Endpoint | JSON | **230** 📦 |
-| **Tapneo** | https://tapneo-data.com | Direct API | CSV/JSON | **647** 📦 |
-| **Jooble** | https://sa.jooble.org | API with Key | JSON | **28** 📦 |
+| **Tapneo** | https://tapneo-data.com | File-based source | CSV/JSON | **647** 📦 |
+| **Jooble** | https://sa.jooble.org | API with Key | JSON | **66** 📦 |
 
 ---
 
-**Total Records Collected**: 📊
+**Total Records Collected**: 1,350📊
 
 ## Selection Reasoning
 
