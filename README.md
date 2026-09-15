@@ -26,20 +26,26 @@ Job-Data-Pipeline/
 ---
 
 
-##📋 Phase 0: Source Inventory & Selection Reasoning
+## 📋 Phase 0: Source Inventory & Selection Reasoning
 
 As part of our initial project investigation phase, we evaluated multiple job platforms to establish a robust and comprehensive dataset for the Saudi technology market
 
 ## Overview
 We identified and integrated 5 primary data sources covering the Saudi job market from different collection methods:
 
-| Source | URL/Identifier | Collection Method | Format | Rate Limit in intial Extraction |
-|--------|---|---|---|---|---|
-| **Tanqeeb** | https://saudi.tanqeeb.com | Web Scraping | JSON |108 |
-| **JSearch** | https://rapidapi.com/letscrape | API with Key | JSON | 206 |
-| **FreeHire** | https://freehire.me/jobs | Direct Endpoint | JSON  | 90 |
-| **Tapneo** | https://tapneo-data.com | Direct API | CSV/JSON | 647 |
-| **Jooble** | https://sa.jooble.org | API with Key | JSON | 28 |
+# 📊 Data Sources - Initial Extraction Rate
+
+| Source | URL/Identifier | Collection Method | Format | Records Extracted |
+|:---:|:---:|:---:|:---:|:---:|
+| **Tanqeeb** | https://saudi.tanqeeb.com | Web Scraping | JSON | **108** 📦 |
+| **JSearch** | https://rapidapi.com/letscrape | API with Key | JSON | **206** 📦 |
+| **FreeHire** | https://freehire.me/jobs | Direct Endpoint | JSON | **90** 📦 |
+| **Tapneo** | https://tapneo-data.com | Direct API | CSV/JSON | **647** 📦 |
+| **Jooble** | https://sa.jooble.org | API with Key | JSON | **28** 📦 |
+
+---
+
+**Total Records Collected**: 1,079 📊
 
 ## Selection Reasoning
 
