@@ -5,20 +5,15 @@ import json
 import re
 from dotenv import load_dotenv
 load_dotenv()
-try:
-    from deep_translator import GoogleTranslator
-    _TRANSLATOR_AVAILABLE = True
-except ImportError:
-    _TRANSLATOR_AVAILABLE = False
 
 from cleaning import (
-    clean_company_name,clean_job_title,clean_job_title_from_location, translate_to_english_if_arabic,
-    clean_city,clean_employment_type,extract_education,clean_description,format_date,extract_tech_skills,
-    deduplicate_by_content,merge_and_save_processed,parse_relative_date,clean_jsearch_location,clean_html_text,
-    is_valid_tech_job,normalize_skill,check_if_tech_job)
+    clean_company_name, clean_job_title, clean_job_title_from_location,
+    clean_city, clean_employment_type, extract_education, clean_description, format_date, extract_tech_skills,
+    deduplicate_by_content, merge_and_save_processed, parse_relative_date, clean_jsearch_location, clean_html_text,
+    is_valid_tech_job, normalize_skill, check_if_tech_job)
 
-RAW_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "raw")
-PROCESSED_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "processed")
+RAW_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "RAW")
+PROCESSED_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "STAGING")
 
 UNIFIED_COLUMNS = [
     "title", "company", "location", "posted_date", "salary",
@@ -47,7 +42,7 @@ def load_raw_from_snowflake(table_name: str) -> pd.DataFrame:
         print(f"☁️ جاري قراءة البيانات من Snowflake: {table_name}...")
 
         query = f"""
-            SELECT RAW_PAYLOAD
+            SELECT RAW_DATA
             FROM {table_name}
         """
 
@@ -81,73 +76,87 @@ def load_raw_from_snowflake(table_name: str) -> pd.DataFrame:
         if conn:
             conn.close()
 
-def fetch_from_snowflake(query: str) -> pd.DataFrame:
-    conn = snowflake.connector.connect(
-        user=os.getenv("SNOWFLAKE_USER"),
-        password=os.getenv("SNOWFLAKE_PASSWORD"),
-        account=os.getenv("SNOWFLAFE_ACCOUNT"),
-        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-        database="JOB_MARKET_DB",
-        schema="PROCESSED_SCHEMA"
-    )
-    try:
-        df = pd.read_sql(query, conn)
-        return df
-    finally:
-        conn.close()
-
-def load_csv_to_snowflake(csv_path: str, table_name: str):
-    if not os.path.exists(csv_path):
-        print(f"⚠️ ملف الـ CSV غير موجود: {csv_path}")
-        return
-
-    df = pd.read_csv(csv_path)
+def save_cleaned_to_snowflake(df: pd.DataFrame, table_name: str, csv_filename: str):
+    """حفظ البيانات النظيفة كـ CSV محلياً وتحديث جدول Staging في Snowflake"""
     if df.empty:
+        print(f"⚠️ الجدول {table_name} فارغ، لا توجد بيانات للرفع.")
         return
 
+    # 1. تنظيف البيانات واستبدال أي NaN بـ None لكي يتعامل معها البايثون وSnowflake كقيم فارغة صحيحة
+    df = df.where(pd.notnull(df), None)
+
+    # 2. حفظ الملف محلياً بصيغة CSV (مع دعم اللغة العربية utf-8-sig)
+    csv_path = os.path.join(PROCESSED_DIR, csv_filename)
+    
+    df_to_save = df.copy()
+    if 'skills' in df_to_save.columns:
+        df_to_save['skills'] = df_to_save['skills'].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+
+    df_to_save.to_csv(csv_path, index=False, encoding='utf-8-sig')
+    print(f"📁 تم حفظ ملف الـ CSV محلياً: {csv_path}")
+
+    # 3. رفع البيانات إلى Snowflake Staging Table
     conn = None
     cursor = None
     try:
         account_val = os.getenv("SNOWFLAKE_ACCOUNT") or os.getenv("SNOWFLAFE_ACCOUNT")
-        
         conn = snowflake.connector.connect(
             user=os.getenv("SNOWFLAKE_USER"),
             password=os.getenv("SNOWFLAKE_PASSWORD"),
             account=account_val,
             warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
             database=os.getenv("SNOWFLAKE_DATABASE"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA")
+            schema="STAGING"
         )
         cursor = conn.cursor()
 
-        print(f"☁️ جاري إرسال {len(df)} سجل من ملف الـ CSV إلى جدول {table_name} في Snowflake...")
-        insert_query = f"INSERT INTO {table_name} (RAW_PAYLOAD) SELECT PARSE_JSON(%s)"
+        # تفريغ الجدول الحالي لتعبئته بالبيانات المحدثة النظيفة
+        cursor.execute(f"TRUNCATE TABLE {table_name}")
 
-        records = df.to_dict(orient="records")
-        for record in records:
-            # تنظيف قيم الـ NaN لكي لا تسبب مشاكل في تحويل الـ JSON
-            clean_record = {k: (v if pd.notna(v) else None) for k, v in record.items()}
-            json_str = json.dumps(clean_record, ensure_ascii=False)
-            cursor.execute(insert_query, (json_str,))
+        insert_query = f"""
+            INSERT INTO {table_name} (
+                job_title, company_name, city, country, 
+                posted_date, employment_type, education, 
+                job_description, skills, job_url
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
 
+        records_to_insert = []
+        for _, row in df_to_save.iterrows():
+            # التأكد من تحويل أي قيم شاذة أو نصية لـ 'nan' إلى None صريح
+            def clean_val(val):
+                if val is None or pd.isna(val) or str(val).strip().lower() in ['nan', 'nat', 'none']:
+                    return None
+                return val
+
+            records_to_insert.append((
+                clean_val(row.get('job_title')),
+                clean_val(row.get('company_name')),
+                clean_val(row.get('city')),
+                clean_val(row.get('country')),
+                clean_val(row.get('posted_date')),
+                clean_val(row.get('employment_type')),
+                clean_val(row.get('education')),
+                clean_val(row.get('job_description')),
+                clean_val(row.get('skills')),
+                clean_val(row.get('job_url'))
+            ))
+
+        cursor.executemany(insert_query, records_to_insert)
         conn.commit()
-        print(f"✅ تم رفع بيانات الـ CSV إلى جدول {table_name} في Snowflake بنجاح!")
+        print(f"☁️✅ تم إدراج {len(records_to_insert)} سجل بنجاح في جدول Staging بـ Snowflake: {table_name}\n")
 
     except Exception as e:
-        print(f"❌ خطأ أثناء الرفع لـ Snowflake ({table_name}): {e}")
-        if conn:
-            conn.rollback()
+        print(f"❌ خطأ أثناء إرسال البيانات إلى جدول Staging ({table_name}): {e}")
     finally:
         if cursor:
             cursor.close()
         if conn:
             conn.close()
 
-
 def process_tapneo() -> pd.DataFrame:
-    df = load_raw_from_snowflake(
-    "JOB_MARKET_DB.RAW_SCHEMA.RAW_TAPNEO_JOBS"
-)
+    df = load_raw_from_snowflake("RAW_TEPNEO_JOBS")
 
     if df.empty:
         print("⚠️ لا توجد بيانات Tapneo في Snowflake")
@@ -196,22 +205,21 @@ def process_tapneo() -> pd.DataFrame:
 
     df_temp = pd.DataFrame(standardized_jobs)
     
-    df_temp.drop_duplicates(subset=['company_name', 'job_title', 'job_description'], keep='first', inplace=True)
-    df_temp = df_temp.where(pd.notnull(df_temp), None)
+    if not df_temp.empty:
+        df_temp.drop_duplicates(subset=['company_name', 'job_title', 'job_description'], keep='first', inplace=True)
+        df_temp = df_temp.where(pd.notnull(df_temp), None)
 
     output_path = os.path.join(PROCESSED_DIR, "tapneo_tech_jobs_cleaned.json")
     merge_and_save_processed(df_temp, output_path, key_cols=["company_name", "city", "job_description"], fresh=True)
 
-    #csv_tapneo_path = os.path.join(PROCESSED_DIR, "csv", "tapneo_tech_jobs_cleaned.csv")
-    #load_csv_to_snowflake(csv_tapneo_path, "JOB_MARKET_DB.PROCESSED_SCHEMA.PROCESSED_TAPNEO_JOBS")
+    # حفظ محلياً كـ CSV وتحديث جدول Snowflake Staging
+    save_cleaned_to_snowflake(df_temp, "STG_TEPNEO_JOBS", "csv/tapneo_tech_jobs_cleaned.csv")
 
     print(f"✅ اكتملت معالجة Tapneo بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}")
     return df_temp
 
 def process_jsearch() -> pd.DataFrame:
-    df = load_raw_from_snowflake(
-        "JOB_MARKET_DB.RAW_SCHEMA.RAW_JSEARCH_JOBS"
-    )
+    df = load_raw_from_snowflake("RAW_JSEARCH_JOBS")
     
     if df.empty:
         print("⚠️ لا توجد بيانات JSEARCH في Snowflake")
@@ -297,18 +305,15 @@ def process_jsearch() -> pd.DataFrame:
 
     output_path = os.path.join(PROCESSED_DIR, "jsearch_tech_jobs_cleaned.json")
     merge_and_save_processed(df_temp, output_path, key_cols=["company_name", "city", "job_description"], fresh=True)
-
-    #csv_tapneo_path = os.path.join(PROCESSED_DIR, "csv", "jsearch_tech_jobs_cleaned.csv")
-    #load_csv_to_snowflake(csv_tapneo_path, "JOB_MARKET_DB.PROCESSED_SCHEMA.PROCESSED_JSEARCH_JOBS")
     
-    print(f"✅ اكتملت معالجة JSearch بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}")
-    print()
+    # حفظ محلياً كـ CSV وتحديث جدول Snowflake Staging
+    save_cleaned_to_snowflake(df_temp, "STG_JSEARCH_JOBS", "csv/jsearch_tech_jobs_cleaned.csv")
+
+    print(f"✅ اكتملت معالجة JSearch بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}\n")
     return df_temp
 
 def process_jooble() -> pd.DataFrame:
-    df = load_raw_from_snowflake(
-            "JOB_MARKET_DB.RAW_SCHEMA.RAW_JOOBLE_JOBS"
-        )
+    df = load_raw_from_snowflake("RAW_JOOBLE_JOBS")
         
     if df.empty:
         print("⚠️ لا توجد بيانات JOOBLE في Snowflake")
@@ -390,20 +395,16 @@ def process_jooble() -> pd.DataFrame:
         df_temp = df_temp.where(pd.notnull(df_temp), None)
 
     output_path = os.path.join(PROCESSED_DIR, "jooble_tech_jobs_cleaned.json")
-    
     merge_and_save_processed(df_temp, output_path, key_cols=["company_name", "city", "job_description"], fresh=True)
-    #csv_tapneo_path = os.path.join(PROCESSED_DIR, "csv", "jooble_tech_jobs_cleaned.csv")
-    #load_csv_to_snowflake(csv_tapneo_path, "JOB_MARKET_DB.PROCESSED_SCHEMA.PROCESSED_JOOBLE_JOBS")
     
-    print(f"✅ اكتملت معالجة Jooble بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}")
-    print()
+    # حفظ محلياً كـ CSV وتحديث جدول Snowflake Staging
+    save_cleaned_to_snowflake(df_temp, "STG_JOOBLE_JOBS", "csv/jooble_tech_jobs_cleaned.csv")
+
+    print(f"✅ اكتملت معالجة Jooble بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}\n")
     return df_temp
 
 def process_freehire() -> pd.DataFrame:
-
-    df = load_raw_from_snowflake(
-                "JOB_MARKET_DB.RAW_SCHEMA.RAW_FREEHIRE_JOBS"
-            )
+    df = load_raw_from_snowflake("RAW_FREEHIRE_JOBS")
             
     if df.empty:
         print("⚠️ لا توجد بيانات FREEHIRE في Snowflake")
@@ -463,7 +464,6 @@ def process_freehire() -> pd.DataFrame:
             city = None
 
         country = "Saudi Arabia"
-
         posted_date = format_date(item.get('posted_date'))
         
         employment_type = clean_employment_type(item.get('category', ''), job_description)
@@ -514,27 +514,26 @@ def process_freehire() -> pd.DataFrame:
             lambda x: None if pd.isna(x) or str(x).strip() in ['NaN', 'nan', ''] else x
         )
         
-        df_temp.drop_duplicates(subset=['company_name', 'city', 'job_description'], keep='first', inplace=True)  # ✅ نفس الـ cols
+        df_temp.drop_duplicates(subset=['company_name', 'city', 'job_description'], keep='first', inplace=True)
         df_temp = df_temp.where(pd.notnull(df_temp), None)
 
     output_path = os.path.join(PROCESSED_DIR, "freehire_tech_jobs_cleaned.json")
     merge_and_save_processed(df_temp, output_path, key_cols=["company_name", "city", "job_description"], fresh=True)
-    #csv_tapneo_path = os.path.join(PROCESSED_DIR, "csv", "freehire_tech_jobs_cleaned.csv")
-    #load_csv_to_snowflake(csv_tapneo_path, "JOB_MARKET_DB.PROCESSED_SCHEMA.PROCESSED_FREEHIRE_JOBS")
         
-    print(f"✅ اكتملت معالجة Freehire بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}")
-    print()
+    # حفظ محلياً كـ CSV وتحديث جدول Snowflake Staging
+    save_cleaned_to_snowflake(df_temp, "STG_FREEHIRE_JOBS", "csv/freehire_tech_jobs_cleaned.csv")
+
+    print(f"✅ اكتملت معالجة Freehire بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}\n")
     return df_temp
 
 def process_tanqeeb() -> pd.DataFrame:
-    raw_data = load_raw_from_snowflake("JOB_MARKET_DB.RAW_SCHEMA.RAW_TANQEEB_JOBS")
+    raw_data = load_raw_from_snowflake("RAW_TANQEEB_JOBS")
     
     if raw_data.empty:
         print("⚠️ لا توجد بيانات Tanqeeb في Snowflake")
         return pd.DataFrame()
     
     print(f"Deep cleaning and filtering {len(raw_data)} records from Tanqeeb...")
-        
 
     standardized_jobs = []
     non_tech_count = 0
@@ -542,7 +541,7 @@ def process_tanqeeb() -> pd.DataFrame:
     for _, item in raw_data.iterrows():  
         company_name = clean_company_name(item.get('company_name'))
         
-        job_title = item.get('job_title', 'Technical Professional').strip()
+        job_title = item.get('job_title').strip()
         job_title = re.sub(r'[^\w\s\/\-\(\)\.\,\+]+', '', job_title).strip()
         
         raw_desc = item.get('job_description', '')
@@ -584,25 +583,14 @@ def process_tanqeeb() -> pd.DataFrame:
 
     if not df_temp.empty:
         df_temp.drop_duplicates(subset=['company_name', 'job_title', 'job_description'], keep='first', inplace=True)
-        
-        if _TRANSLATOR_AVAILABLE:
-            print("Translating Arabic fields to English...")
-            df_temp['job_title'] = df_temp['job_title'].apply(translate_to_english_if_arabic)
-            df_temp['job_title'] = df_temp['job_title'].apply(lambda x: ' '.join(dict.fromkeys(x.split())) if pd.notna(x) else x)
-            df_temp['job_description'] = df_temp['job_description'].apply(translate_to_english_if_arabic)
-        
-        print("Re-extracting tech skills from translated text...")
-        df_temp['skills'] = df_temp['job_description'].apply(lambda desc: extract_tech_skills(str(desc)))
-        
         df_temp = df_temp.where(pd.notnull(df_temp), None)
 
     output_path = os.path.join(PROCESSED_DIR, "tanqeeb_tech_jobs_cleaned.json")
     merge_and_save_processed(df_temp, output_path, key_cols=["company_name", "city", "job_description"], fresh=True)
-    #csv_tapneo_path = os.path.join(PROCESSED_DIR, "csv", "tanqeeb_tech_jobs_cleaned.csv")
-        #load_csv_to_snowflake(csv_tapneo_path, "JOB_MARKET_DB.PROCESSED_SCHEMA.PROCESSED_TANQEEB_JOBS")
     
-    print(f"✅ اكتملت معالجة Tanqeeb بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}")
-    print()
+    save_cleaned_to_snowflake(df_temp, "STG_TANQEEB_JOBS", "csv/tanqeeb_tech_jobs_cleaned.csv")
+
+    print(f"✅ اكتملت معالجة Tanqeeb بنجاح وإجمالي الوظائف النظيفة: {len(df_temp)}\n")
     return df_temp
 
 if __name__ == "__main__":

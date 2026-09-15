@@ -5,13 +5,6 @@ import time
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
-
-try:
-    from deep_translator import GoogleTranslator
-    _TRANSLATOR_AVAILABLE = True
-except ImportError:
-    _TRANSLATOR_AVAILABLE = False
-
 from typing import List, Set
 
 TECHNICAL_SKILLS = {
@@ -59,53 +52,6 @@ SPECIAL_SKILL_PATTERNS = {
     'bi': r'\b(?:BI|business intelligence)\b',
 }
 
-def translate_to_english_if_arabic(text):
-    if not text or pd.isna(text):
-        return text
-    
-    text_str = str(text)
-    
-    max_total_retries = 3
-    for global_attempt in range(max_total_retries):
-        if not re.search(r'[\u0600-\u06FF]', text_str):
-            break 
-            
-        try:
-            translator = GoogleTranslator(source='ar', target='en')
-            chunks = [text_str[i:i+1500] for i in range(0, len(text_str), 1500)]
-            translated_chunks = []
-            
-            for chunk in chunks:
-                if re.search(r'[\u0600-\u06FF]', chunk):
-                    success = False
-                    for attempt in range(3):
-                        try:
-                            res = translator.translate(chunk)
-                            if res and not re.search(r'[\u0600-\u06FF]', res):
-                                translated_chunks.append(res)
-                                success = True
-                                time.sleep(1.5) 
-                                break
-                            else:
-                                time.sleep(2)
-                        except:
-                            time.sleep(3)
-                    
-                    if not success:
-                        translated_chunks.append(chunk) 
-                else:
-                    translated_chunks.append(chunk)
-            
-            translated_text = " ".join(translated_chunks)
-            if not re.search(r'[\u0600-\u06FF]', translated_text):
-                return translated_text
-            else:
-                text_str = translated_text 
-                time.sleep(3)
-        except Exception as e:
-            time.sleep(4)
-            
-    return text_str
 
 def normalize_skill(skill: str) -> str:
     if not skill:
@@ -285,26 +231,27 @@ def check_if_tech_job(job_title, description, skills):
     title_lower = str(job_title).lower()
     desc_lower = str(description).lower()
 
+    infra_keywords = [
+            "نظم تشغيل", "systems specialist", "system specialist", "backup", 
+            "disaster recovery", "سيرفرات", "network", "IT","Information Technology"
+            "sysadmin", "system administrator", "cloud", "devops", "systems"
+        ]
+        
+    if any(keyword in title_lower or keyword in desc_lower for keyword in infra_keywords):
+            return True
+
     strict_blocklist = [
         "طبيب", "استشاري أمراض جلدية", "صيدلي", "تمريض", "doctor", "dermatologist", "medical", "nurse",
         "استقطاب المواهب", "موظف استقطاب", "مورد بشري", "hr", "talent acquisition", "recruiter", "recruitment",
         "هيدروليكية", "ميكانيكي", "فني أنظمة", "حفر", "مفتش مراقبة الجودة", "hydraulic", "mechanic", "technician", "civil", "structural",
         "محتوى رياضي", "توطين المحتوى", "مصمم جرافيك", "مترجم", "content", "translation", "graphic designer", "sports content",
-        "تطوير أعمال", "مبيعات", "مدير حسابات", "business development", "sales", "account manager"
+        "تطوير أعمال", "مبيعات", "مدير حسابات", "business development", "sales", "account manager","Enterprise Architec"
     ]
 
     for word in strict_blocklist:
         if word in title_lower or word in desc_lower:
             return False
 
-    infra_keywords = [
-        "نظم تشغيل", "systems specialist", "system specialist", "backup", 
-        "disaster recovery", "سيرفرات", "network", 
-        "sysadmin", "system administrator", "cloud", "devops", "systems"
-    ]
-    
-    if any(keyword in title_lower or keyword in desc_lower for keyword in infra_keywords):
-        return True
 
     tech_degrees = [
         "علوم الحاسب", "تقنية المعلومات", "هندسة البرمجيات", "هندسة الحاسب", 
