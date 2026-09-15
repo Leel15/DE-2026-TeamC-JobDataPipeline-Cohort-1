@@ -30,21 +30,20 @@ Job-Data-Pipeline/
 
 As part of our initial project investigation phase, we evaluated multiple job platforms to establish a robust and comprehensive dataset for the Saudi technology market
 
-- **Tanqeeb**: Web scraping from Saudi Tanqeeb portal
-- **Jooble**: Official API integration
-- **JSearch**: RapidAPI provider
-- **FreeHire**: Direct API/Web endpoint
-- **Tapneo**: Local file imports
+## Overview
+We identified and integrated 5 primary data sources covering the Saudi job market from different collection methods:
 
-  
-| Source | URL/Identifier | Collection Method | Format |
-|--------|---|---|---|
-| **Tanqeeb** | https://saudi.tanqeeb.com/s/jobs/IT-jobs | Web Scraping (SEO-friendly category browsing) | HTML / DOM Elements |
-| **Jooble** | Official Jooble API Endpoint | API with Key | JSON |
-| **JSearch** | RapidAPI (JSearch Provider) | API with Key | JSON |
-| **FreeHire** | FreeHire Platform Endpoint | API / Web Endpoint | JSON |
-| **Tapneo** | Local / Exported Data Source | File-based Source | CSV / JSON |
+| Source | URL/Identifier | Collection Method | Format | Rate Limit in intial Extraction |
+|--------|---|---|---|---|---|
+| **Tanqeeb** | https://saudi.tanqeeb.com | Web Scraping | JSON |108 |
+| **JSearch** | https://rapidapi.com/letscrape | API with Key | JSON | 206 |
+| **FreeHire** | https://freehire.me/jobs | Direct Endpoint | JSON  | 90 |
+| **Tapneo** | https://tapneo-data.com | Direct API | CSV/JSON | 647 |
+| **Jooble** | https://sa.jooble.org | API with Key | JSON | 28 |
 
+## Selection Reasoning
+
+We implemented a multi-source hybrid extraction strategy combining reliable, structured API providers (Jooble, JSearch, FreeHire) with targeted web scraping (Tanqeeb) and file-based ingestion (Tapneo). This ensures broad coverage of tech job postings across the Kingdom while avoiding platform limitations. Other potential sources with heavy login walls or strict rate limits were dropped after initial access testing.
 
 ## 🚀 Getting Started
 
