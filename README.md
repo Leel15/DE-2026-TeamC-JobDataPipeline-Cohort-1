@@ -39,13 +39,13 @@ We identified and integrated 5 primary data sources covering the Saudi job marke
 |:---:|:---:|:---:|:---:|:---:|
 | **Tanqeeb** | https://saudi.tanqeeb.com | Web Scraping | JSON | **108** 📦 |
 | **JSearch** | https://rapidapi.com/letscrape | API with Key | JSON | **206** 📦 |
-| **FreeHire** | https://freehire.me/jobs | Direct Endpoint | JSON | **90** 📦 |
+| **FreeHire** | https://freehire.me/jobs | Direct Endpoint | JSON | **230** 📦 |
 | **Tapneo** | https://tapneo-data.com | Direct API | CSV/JSON | **647** 📦 |
 | **Jooble** | https://sa.jooble.org | API with Key | JSON | **28** 📦 |
 
 ---
 
-**Total Records Collected**: 1,079 📊
+**Total Records Collected**: 📊
 
 ## Selection Reasoning
 
