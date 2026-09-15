@@ -7,7 +7,9 @@ from urllib.parse import urlencode, urljoin
 from bs4 import BeautifulSoup
 import requests
 from dotenv import load_dotenv
-import snowflake.connector
+from datetime import datetime
+
+from azure.storage.filedatalake import DataLakeServiceClient
 
 load_dotenv()
 SCRAPEOPS_API_KEY = os.getenv("SCRAPEOPS_API_KEY")
@@ -16,56 +18,15 @@ BASE_URL = "https://saudi.tanqeeb.com"
 NUMBER_OF_JOBS = 20 
 MAX_PAGES = 100  
 
-# ============ المسارات حسب هيكلتك السابقة ============
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
-RAW_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
+RAW_DIR = os.path.join(PROJECT_ROOT, "data", "RAW")
 os.makedirs(RAW_DIR, exist_ok=True)
 
 JOBS_FILE = os.path.join(RAW_DIR, "tanqeeb_tech_jobs.json")
 LINKS_CACHE_FILE = os.path.join(RAW_DIR, "Extracted links", "tanqeeb_links_cache.json")
 os.makedirs(os.path.dirname(LINKS_CACHE_FILE), exist_ok=True)
 
-
-import snowflake.connector
-
-def load_jobs_to_snowflake(jobs_list):
-    if not jobs_list:
-        return
-
-    conn = None
-    cursor = None
-    try:
-        conn = snowflake.connector.connect(
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            account=os.getenv("SNOWFLAFE_ACCOUNT"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database=os.getenv("SNOWFLAKE_DATABASE"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA")
-        )
-        cursor = conn.cursor()
-        
-        print(f"☁️ جاري إرسال {len(jobs_list)} وظيفة إلى جدول RAW_TANQEEB_JOBS في Snowflake...")
-        
-        insert_query = "INSERT INTO RAW_TANQEEB_JOBS (RAW_PAYLOAD) SELECT PARSE_JSON(%s)"
-        
-        for job in jobs_list:
-            json_str = json.dumps(job, ensure_ascii=False)
-            cursor.execute(insert_query, (json_str,))
-            
-        conn.commit()
-        print("✅ تم رفع البيانات إلى Snowflake بنجاح!")
-
-    except Exception as e:
-        print(f"❌ خطأ أثناء الرفع لـ Snowflake: {e}")
-        if conn:
-            conn.rollback()
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 def get_scrapeops_url(url, render_js=False):
     payload = {
@@ -95,6 +56,43 @@ def get_page(url, render_js=False):
     except requests.RequestException as e:
         print(f"❌ خطأ أثناء تحميل الصفحة: {e}")
         return None
+
+
+def upload_to_adls_gen2(jobs_to_upload, source_name="tanqeeb"):
+    
+    if not jobs_to_upload:
+        print("✨ لا توجد وظائف جديدة لرفعها إلى Azure في هذه الجلسة.")
+        return
+
+    account_name = os.getenv("AZURE_STORAGE_ACCOUNT", "datajobpipline")
+    container_name = os.getenv("AZURE_STORAGE_CONTAINER", "data")
+    sas_token = os.getenv("AZURE_SAS_TOKEN")
+
+    if not sas_token:
+        print("⚠️ لم يتم العثور على AZURE_SAS_TOKEN في ملف .env، تعذر الرفع لـ Azure.")
+        return
+
+    try:
+        account_url = f"https://{account_name}.dfs.core.windows.net"
+        if not sas_token.startswith("?"):
+            sas_token = f"?{sas_token}"
+            
+        service_client = DataLakeServiceClient(account_url=f"{account_url}{sas_token}")
+        file_system_client = service_client.get_file_system_client(container_name)
+
+        ingest_date = datetime.now().strftime("%Y-%m-%d")
+        remote_file_path = f"raw/{source_name}/ingest_date={ingest_date}/data.json"
+
+        json_payload = json.dumps(jobs_to_upload, ensure_ascii=False, indent=2)
+
+        file_client = file_system_client.get_file_client(remote_file_path)
+        file_client.upload_data(json_payload, overwrite=True)
+
+        print(f"🚀 تم رفع الوظائف الجديدة ({len(jobs_to_upload)} وظيفة) بنجاح إلى Azure في المسار:")
+        print(f"   📂 {container_name}/{remote_file_path}")
+
+    except Exception as e:
+        print(f"❌ حدث خطأ أثناء الرفع إلى Azure ADLS Gen2: {e}")
 
 
 def load_extracted_links():
@@ -165,23 +163,11 @@ def get_job_links():
     job_links = set()
     page = 1
 
-    search_params = {
-        "keywords": "",
-        "country": "54",
-        "state": "0",
-        "category": "1002",
-        "workplace": "0",
-        "search_period": "0",
-        "lang": "all"
-    }
-
     while page <= MAX_PAGES:
-        query_string = urlencode(search_params)
-
         if page == 1:
-            page_url = f"{BASE_URL}/ar/jobs/search?{query_string}"
+            page_url = f"{BASE_URL}/s/jobs/IT-jobs"
         else:
-            page_url = f"{BASE_URL}/ar/jobs/search/page/{page}?{query_string}"
+            page_url = f"{BASE_URL}/s/jobs/IT-jobs/page/{page}"
 
         print(f"\n📄 جاري البحث في الصفحة {page}:")
         print(page_url)
@@ -327,6 +313,7 @@ def scrape_job(job_url):
         return None
 
     employment_type = ld_data.get("employmentType", "Not Specified")
+    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     job_record = {
         "job_title": job_title,
@@ -336,7 +323,8 @@ def scrape_job(job_url):
         "employment_type": employment_type,
         "job_description": full_description,
         "job_url": job_url,
-        "source": "tanqeeb"
+        "source": "tanqeeb",
+        "extracted_at": current_timestamp
     }
 
     print(f"✅ تم بنجاح: {job_title} | {company_name}")
@@ -390,19 +378,16 @@ def main():
     all_extracted_links.update(new_job_links)
     save_extracted_links(all_extracted_links)
     
-    print(f"\n💾 جاري حفظ الوظائف...")
+    print(f"\n💾 جاري حفظ الوظائف محلياً...")
     save_jobs(unique_jobs)
 
-    if new_jobs:
-        load_jobs_to_snowflake(new_jobs)
-
-    
+    upload_to_adls_gen2(new_jobs, source_name="tanqeeb")
 
     print("\n" + "=" * 70)
     print(f"✅ تم الانتهاء بنجاح!")
     print(f"   • وظائف مستخرجة جديدة: {successfully_scraped}")
-    print(f"   • إجمالي الوظائف المحفوظة: {len(unique_jobs)}")
-    print(f"   • المسار: {JOBS_FILE}")
+    print(f"   • إجمالي الوظائف المحفوظة محلياً: {len(unique_jobs)}")
+    print(f"   • المسار المحلي: {JOBS_FILE}")
     print("=" * 70)
 
 

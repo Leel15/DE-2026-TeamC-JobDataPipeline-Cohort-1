@@ -3,21 +3,22 @@ import os
 import time
 import requests
 from dotenv import load_dotenv
-import snowflake.connector
+from datetime import datetime
+
+from azure.storage.filedatalake import DataLakeServiceClient
 
 load_dotenv()
 
 URL = "https://jsearch.p.rapidapi.com/search-v2"
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 
-TARGET_JOBS = 5
-NUM_PAGES = 2
+TARGET_JOBS = 100
+NUM_PAGES = 4
 TIMEOUT = 60
 
-# ============ المسارات المحددة حسب طلبك ============
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
-DATA_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
+DATA_DIR = os.path.join(PROJECT_ROOT, "data", "RAW")
 
 RAW_FILE = os.path.join(DATA_DIR, "jsearch_tech_jobs.json")
 SEEN_URLS_FILE = os.path.join(DATA_DIR, "Extracted links", "Jsearch_links_cache.json")
@@ -31,20 +32,15 @@ HEADERS = {
 }
 
 TECH_KEYWORDS = [
-    "software",
-    "developer",
-    "programmer",
-    "IT",
-    "technology",
-    "digital",
-    
+    "full stack",
+    "frontend",
+    "backend",
     "data",
     "analyst",
     "scientist",
     "AI",
     "machine learning",
     "business intelligence",
-    
     "devops",
     "cloud",
     "network",
@@ -53,19 +49,57 @@ TECH_KEYWORDS = [
     "IT support",
     "technical support",
     "administrator",
-    
     "cybersecurity",
     "security",
     "information security",
-    
-    "full stack",
-    "frontend",
-    "backend",
+    "software",
+    "developer",
+    "programmer",
+    "IT",
+    "technology",
+    "digital",
     "web",
     "mobile",
     "QA",
     "tester"
 ]
+
+
+def upload_to_adls_gen2(jobs_to_upload, source_name="jsearch"):
+
+    if not jobs_to_upload:
+        print("✨ لا توجد وظائف جديدة لرفعها إلى Azure في هذه الجلسة.")
+        return
+
+    account_name = os.getenv("AZURE_STORAGE_ACCOUNT", "datajobpipline")
+    container_name = os.getenv("AZURE_STORAGE_CONTAINER", "data")
+    sas_token = os.getenv("AZURE_SAS_TOKEN")
+
+    if not sas_token:
+        print("⚠️ لم يتم العثور على AZURE_SAS_TOKEN في ملف .env، تعذر الرفع لـ Azure.")
+        return
+
+    try:
+        account_url = f"https://{account_name}.dfs.core.windows.net"
+        if not sas_token.startswith("?"):
+            sas_token = f"?{sas_token}"
+            
+        service_client = DataLakeServiceClient(account_url=f"{account_url}{sas_token}")
+        file_system_client = service_client.get_file_system_client(container_name)
+
+        ingest_date = datetime.now().strftime("%Y-%m-%d")
+        remote_file_path = f"raw/{source_name}/ingest_date={ingest_date}/data.json"
+
+        json_payload = json.dumps(jobs_to_upload, ensure_ascii=False, indent=2)
+
+        file_client = file_system_client.get_file_client(remote_file_path)
+        file_client.upload_data(json_payload, overwrite=True)
+
+        print(f"🚀 تم رفع الوظائف الجديدة ({len(jobs_to_upload)} وظيفة) بنجاح إلى Azure في المسار:")
+        print(f"   📂 {container_name}/{remote_file_path}")
+
+    except Exception as e:
+        print(f"❌ حدث خطأ أثناء الرفع إلى Azure ADLS Gen2: {e}")
 
 
 def load_seen_urls():
@@ -110,45 +144,6 @@ def load_old_jobs():
     except Exception as e:
         print(f"⚠️ خطأ في قراءة ملف الوظائف القديمة: {e}")
     return []
-
-
-# ============ دالة الرفع إلى Snowflake ============
-def load_jobs_to_snowflake(jobs_list):
-    if not jobs_list:
-        return
-
-    conn = None
-    cursor = None
-    try:
-        conn = snowflake.connector.connect(
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            account=os.getenv("SNOWFLAFE_ACCOUNT"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database=os.getenv("SNOWFLAKE_DATABASE"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA")
-        )
-        cursor = conn.cursor()
-
-        print(f"☁️ جاري إرسال {len(jobs_list)} وظيفة جديدة إلى جدول RAW_JSEARCH_JOBS في Snowflake...")
-        insert_query = "INSERT INTO RAW_JSEARCH_JOBS (RAW_PAYLOAD) SELECT PARSE_JSON(%s)"
-
-        for job in jobs_list:
-            json_str = json.dumps(job, ensure_ascii=False)
-            cursor.execute(insert_query, (json_str,))
-
-        conn.commit()
-        print("✅ تم رفع البيانات إلى Snowflake بنجاح!")
-
-    except Exception as e:
-        print(f"❌ خطأ أثناء الرفع لـ Snowflake: {e}")
-        if conn:
-            conn.rollback()
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 
 def search_jobs(keyword):
@@ -218,16 +213,19 @@ def is_saudi_job(job):
 
 def format_job_record(job):
     """تنسيق الوظيفة بالشكل المطلوب تماماً"""
+    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     return {
         "title": job.get("job_title", "بدون عنوان"),
         "company": job.get("employer_name", "بدون شركة"),
         "location": job.get("job_location", "السعودية"),
         "date": job.get("job_posted_at_datetime_utc"),
-        "salary": job.get("job_min_salary"), # أو حسب حقل الراتب المتاح لديك
-        "snippet": job.get("job_description", "")[:300], # اقتطف جزء أو الوصف كامل حسب الرغبة
+        "salary": job.get("job_min_salary"),
+        "snippet": job.get("job_description", "")[:300],
         "url": get_job_url(job),
         "employment_type": job.get("job_employment_type", "دوام كامل"),
-        "source": "jsearch"
+        "source": "jsearch",
+        "extracted_at": current_timestamp
     }
 
 
@@ -263,7 +261,6 @@ def main():
             if not job_url or job_url in seen_urls or job_url in new_urls:
                 continue
 
-            # تنسيق السجل بالشكل المطلوب
             formatted_record = format_job_record(job)
 
             new_jobs.append(formatted_record)
@@ -286,10 +283,9 @@ def main():
 
     save_seen_urls(seen_urls)
 
-    print(f"\n✅ تم الانتهاء! تمت إضافة {len(new_jobs)} وظيفة جديدة.")
-    
-    # 🚀 رفع الوظائف الجديدة فقط إلى Snowflake
-    load_jobs_to_snowflake(new_jobs)
+    upload_to_adls_gen2(new_jobs, source_name="jsearch")
+
+    print(f"\n✅ تم الانتهاء! تمت إضافة {len(new_jobs)} وظيفة جديدة محلياً وإلى أزور.")
 
 
 if __name__ == "__main__":

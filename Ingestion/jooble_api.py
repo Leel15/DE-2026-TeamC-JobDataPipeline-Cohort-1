@@ -7,66 +7,48 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import snowflake.connector
+from azure.storage.filedatalake import DataLakeServiceClient
+
 load_dotenv()
 
-# قائمة شاملة من المسميات التقنية لتغطية أوسع لسوق العمل السعودي
-TECH_KEYWORDS = [
-    # هندسة البرمجيات والتطوير
-    "software engineer", "software developer", "backend developer",
-    "frontend developer", "full stack developer", "mobile developer",
-    "iOS developer", "Android developer", "web developer",
-    "QA engineer", "quality assurance engineer", "test engineer",
-    "embedded systems engineer", "game developer",
-
-    # البيانات والذكاء الاصطناعي
-    "data scientist", "data analyst", "data engineer", "data architect",
-    "machine learning", "artificial intelligence", "AI engineer",
-    "big data engineer", "NLP engineer", "computer vision engineer",
-    "deep learning engineer", "business intelligence",
-
-    # البنية التحتية والأنظمة والشبكات
-    "devops", "site reliability engineer", "infrastructure engineer",
-    "systems administrator", "system administrator", "network engineer",
-    "network administrator", "cloud engineer", "cloud architect",
-    "database administrator",
-
-    # الأمن السيبراني
-    "cyber security", "penetration tester", "security analyst",
-    "SOC analyst", "information security engineer",
-
-    # الإدارة التقنية
-    "technical project manager", "IT manager", "IT project manager",
-    "IT support", "engineering manager",
-
-    # تصميم وتجربة المستخدم
-    "UI UX designer", "UX researcher", "product designer",
-
-    # قواعد البيانات والتحليلات
-    "ETL developer", "BI developer", "data warehouse engineer"
-]
+TARGET_JOBS = 50
 
 LOCATIONS = [
     "Saudi Arabia",
-    "Riyadh, Saudi Arabia",
-    "Jeddah, Saudi Arabia",
-    "Dammam, Saudi Arabia",
-    "Khobar, Saudi Arabia",
-    "Mecca, Saudi Arabia",
-    "Medina, Saudi Arabia"
+    "Riyadh",
+    "Jeddah",
+    "Dammam",
+    "Khobar",
+    "Mecca",
+    "Medina",
+    "Tabuk",
+    "Abha",
+    "Buraydah",
+    "Dhahran",
+    "Jubail",
+    "Yanbu",
+    "Al Ahsa",
+    "Khamis Mushait",
+    "Hail"
 ]
 
-# كلمات تقنية بسيطة للتحقق من العنوان — مجرد وجود كلمة واحدة كافٍ
+TECH_KEYWORDS = [
+    "software engineer", "software developer", "backend developer",
+    "frontend developer", "full stack developer", "mobile developer",
+    "data scientist", "data analyst", "data engineer",
+    "machine learning", "artificial intelligence", "AI engineer",
+    "devops", "cloud engineer", "cyber security", "penetration tester",
+    "UI UX designer", "IT support"
+]
+
 TECH_TITLE_WORDS = [
     "engineer", "developer", "programmer", "scientist", "analyst",
     "architect", "administrator", "devops", "security", "cloud",
     "network", "database", "data", "software", "system", "it ",
     "machine learning", "ai ", "ux", "ui", "qa", "test", "cyber",
-    "backend", "frontend", "full stack", "mobile", "web", "bi ",
-    "etl", "sre", "sysadmin"
+    "backend", "frontend", "full stack", "mobile", "web", "bi "
 ]
 
-# استبعاد فقط الحالات الواضحة جدًا التي لا علاقة لها بالتقنية إطلاقًا
 CLEAR_EXCLUDE_WORDS = [
     "sales representative", "sales manager", "account executive",
     "marketing manager", "financial analyst", "civil engineer",
@@ -79,224 +61,157 @@ US_STATE_INDICATORS = [
     "county", "ohio", "indiana", "california", "texas"
 ]
 
-def load_jobs_to_snowflake(jobs_list):
-    if not jobs_list:
-        return
-
-    conn = None
-    cursor = None
-    try:
-        conn = snowflake.connector.connect(
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            account=os.getenv("SNOWFLAKE_ACCOUNT"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database=os.getenv("SNOWFLAKE_DATABASE"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA")
-        )
-        cursor = conn.cursor()
-
-        print(f"☁️ جاري إرسال {len(jobs_list)} سجل إلى جدول RAW_JOOBLE_JOBS في Snowflake...")
-        insert_query = "INSERT INTO RAW_JOOBLE_JOBS (RAW_PAYLOAD) SELECT PARSE_JSON(%s)"
-
-        for job in jobs_list:
-            json_str = json.dumps(job, ensure_ascii=False)
-            cursor.execute(insert_query, (json_str,))
-
-        conn.commit()
-        print("✅ تم رفع البيانات إلى Snowflake بنجاح!")
-
-    except Exception as e:
-        print(f"❌ خطأ أثناء الرفع لـ Snowflake: {e}")
-        if conn:
-            conn.rollback()
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 def create_resilient_session() -> requests.Session:
-    """
-    ينشئ session واحدة تُعاد استخدامها لكل الطلبات، مع إعادة محاولة تلقائية
-    عند فشل الاتصال أو أخطاء السيرفر المؤقتة (5xx).
-    """
     session = requests.Session()
-
     retry_strategy = Retry(
-        total=3,                                   # 3 محاولات إضافية قبل الاستسلام
-        backoff_factor=2,                           # ينتظر 2، 4، 8 ثوانٍ بين كل محاولة
-        status_forcelist=[429, 500, 502, 503, 504], # أخطاء يُعاد المحاولة عندها
+        total=3,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["POST"],
     )
-
     adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-
     return session
 
 
-def fetch_all_pages(session: requests.Session, api_key: str, keyword: str, location: str):
-    url = f"https://jooble.org/api/{api_key}"
-    all_jobs = []
-    page = 1
-    total_count_reported = None
+def upload_to_adls_gen2(jobs_to_upload, source_name="jooble"):
 
-    while True:
-        payload = {"keywords": keyword, "location": location, "page": page}
+    if not jobs_to_upload:
+        print("✨ لا توجد وظائف جديدة لرفعها إلى Azure في هذه الجلسة.")
+        return
 
-        try:
-            response = session.post(url, json=payload, timeout=30)
-        except requests.exceptions.ConnectionError as e:
-            print(f"⚠️ فشل الاتصال ({keyword} | {location} - صفحة {page}): {e}")
-            print("⏳ الانتظار 5 ثوانٍ قبل الانتقال للتقاطع التالي...")
-            time.sleep(5)
-            break
-        except requests.exceptions.Timeout:
-            print(f"⏱️ انتهت مهلة الاتصال ({keyword} | {location} - صفحة {page})")
-            break
+    account_name = os.getenv("AZURE_STORAGE_ACCOUNT", "datajobpipline")
+    container_name = os.getenv("AZURE_STORAGE_CONTAINER", "data")
+    sas_token = os.getenv("AZURE_SAS_TOKEN")
 
-        if response.status_code != 200:
-            print(f"⚠️ خطأ ({keyword} | {location} - صفحة {page}): {response.status_code}")
-            break
+    if not sas_token:
+        print("⚠️ لم يتم العثور على AZURE_SAS_TOKEN في ملف .env، تعذر الرفع لـ Azure.")
+        return
 
-        data = response.json()
-        jobs = data.get("jobs", [])
+    try:
+        account_url = f"https://{account_name}.dfs.core.windows.net"
+        if not sas_token.startswith("?"):
+            sas_token = f"?{sas_token}"
+            
+        service_client = DataLakeServiceClient(account_url=f"{account_url}{sas_token}")
+        file_system_client = service_client.get_file_system_client(container_name)
 
-        if total_count_reported is None:
-            total_count_reported = data.get("totalCount", "غير متوفر")
+        ingest_date = datetime.now().strftime("%Y-%m-%d")
+        remote_file_path = f"raw/{source_name}/ingest_date={ingest_date}/data.json"
 
-        if not jobs:
-            break
+        json_payload = json.dumps(jobs_to_upload, ensure_ascii=False, indent=2)
 
-        all_jobs.extend(jobs)
-        page += 1
+        file_client = file_system_client.get_file_client(remote_file_path)
+        file_client.upload_data(json_payload, overwrite=True)
 
-        if page > 50:
-            break
+        print(f"🚀 تم رفع الوظائف الجديدة ({len(jobs_to_upload)} وظيفة) بنجاح إلى Azure في المسار:")
+        print(f"   📂 {container_name}/{remote_file_path}")
 
-        time.sleep(0.5)  # تأخير بسيط بين الصفحات لتقليل الضغط على السيرفر
-
-    print(f"✅ {keyword} | {location}: استلمنا {len(all_jobs)} من إجمالي معلن {total_count_reported}")
-    return all_jobs
+    except Exception as e:
+        print(f"❌ حدث خطأ أثناء الرفع إلى Azure ADLS Gen2: {e}")
 
 
 def is_saudi_location(location: str) -> bool:
-    """فلترة خفيفة: تقبل الموقع الفاضي (لأن البحث أصلاً كان بموقع سعودي)
-    وتستبعد فقط لو ظهرت إشارة واضحة لمكان غير سعودي."""
     if not location:
         return True
-
     loc_lower = location.lower()
-
     for us_signal in US_STATE_INDICATORS:
         if us_signal in loc_lower:
             return False
-
     return True
 
 
 def is_tech_title(title: str) -> bool:
-    """فلترة بسيطة: تكفي كلمة تقنية واحدة بالعنوان، واستبعاد فقط للحالات الواضحة."""
     if not title:
         return False
-
     title_lower = title.lower()
-
     for excluded in CLEAR_EXCLUDE_WORDS:
         if excluded in title_lower:
             return False
-
     return any(word in title_lower for word in TECH_TITLE_WORDS)
 
 
 def get_jooble_jobs() -> pd.DataFrame:
-    """
-    يسحب الوظائف من Jooble ويطبّق فلترة أساسية فقط (تقني + سعودي).
-    لا يوجد هنا أي تنظيف عميق (لا استخراج مهارات، لا خبرة، لا راتب من النص)
-    — هذي العمليات تُطبَّق لاحقًا عبر Transformation/cleaning.py.
-    """
     api_key = os.getenv("JOOBLE_API_KEY")
     if not api_key:
         raise ValueError("لم يتم العثور على JOOBLE_API_KEY في ملف .env")
 
     session = create_resilient_session()
+    url = f"https://jooble.org/api/{api_key}"
 
     raw_jobs = []
-    total_calls = len(TECH_KEYWORDS) * len(LOCATIONS)
-    print(f"🔄 بدء السحب عبر {len(TECH_KEYWORDS)} كلمة × {len(LOCATIONS)} موقع = {total_calls} طلب بحث\n")
+    print(f"🔄 بدء السحب مع شرط التوقف عند جمع {TARGET_JOBS} وظائف صحيحة...\n")
 
     for location in LOCATIONS:
+        if len(raw_jobs) >= TARGET_JOBS:
+            break
         for keyword in TECH_KEYWORDS:
-            jobs = fetch_all_pages(session, api_key, keyword, location)
-            for job in jobs:
-                job["_search_location"] = location
-            raw_jobs.extend(jobs)
-            time.sleep(1)  # تأخير إضافي بين كل تقاطع كلمة+موقع
+            if len(raw_jobs) >= TARGET_JOBS:
+                break
+
+            payload = {"keywords": keyword, "location": location, "page": 1}
+            try:
+                response = session.post(url, json=payload, timeout=30)
+                if response.status_code != 200:
+                    continue
+                
+                data = response.json()
+                jobs = data.get("jobs", [])
+                
+                for job in jobs:
+                    if len(raw_jobs) >= TARGET_JOBS:
+                        break
+                    
+                    title = job.get("title", "")
+                    location_val = job.get("location", "")
+                    
+                    # فلترة فورية لتوفير الوقت والجهد
+                    if is_tech_title(title) and is_saudi_location(location_val):
+                        job["_search_location"] = location
+                        raw_jobs.append(job)
+                        print(f"✅ تم العثور على ({len(raw_jobs)}/{TARGET_JOBS}): {title} | {location_val}")
+
+            except Exception as e:
+                print(f"⚠️ خطأ أثناء البحث عن ({keyword} | {location}): {e}")
+            
+            time.sleep(0.5)
 
     structured = []
     for job in raw_jobs:
-        title = job.get("title", "")
+        current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         structured.append({
-            "title": title,
+            "title": job.get("title", ""),
             "company": job.get("company"),
             "location": job.get("location"),
             "date": job.get("updated"),
             "salary": job.get("salary"),
-            "snippet": job.get("snippet"),  # خام كما هو (فيه HTML)، التنظيف لاحقًا في cleaning.py
+            "snippet": job.get("snippet"),
             "url": job.get("link"),
             "source": "jooble",
             "search_location": job.get("_search_location"),
+            "extracted_at": current_timestamp
         })
 
     df = pd.DataFrame(structured)
-
-    if df.empty:
-        print("⚠️ لم يتم سحب أي بيانات")
-        return df
-
-    print(f"\n📥 إجمالي الوظائف الخام (قبل أي فلترة): {len(df)}")
-
-    before_tech_filter = len(df)
-    df = df[df["title"].apply(is_tech_title)]
-    print(f"💻 بعد فلترة العناوين التقنية: {len(df)} (أُزيل {before_tech_filter - len(df)})")
-
-    before_location_filter = len(df)
-    df = df[df["location"].apply(is_saudi_location)]
-    print(f"🌍 بعد الفلترة الجغرافية: {len(df)} (أُزيل {before_location_filter - len(df)})")
-
-    before_dedup = len(df)
-    df.drop_duplicates(subset=["title", "company", "url"], inplace=True)
-    df = df.reset_index(drop=True)
-    print(f"🧹 بعد إزالة التكرار: {len(df)} (أُزيل {before_dedup - len(df)})")
-
-    print(f"📊 إجمالي الوظائف التقنية بعد الفلترة الأساسية: {len(df)}")
-
     return df
 
 
 def load_existing_jobs(json_path: str) -> dict:
-    """يقرأ ملف JSON السابق ويرجعه كـ dict مفهرس بالـ url للدمج السريع."""
     if not os.path.exists(json_path):
         return {}
-
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             existing = json.load(f)
         return {job["url"]: job for job in existing if job.get("url")}
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"⚠️ تعذّرت قراءة الملف السابق ({e})، سيتم البدء بقائمة فاضية")
+    except Exception:
         return {}
 
 
 def merge_and_save_jobs(new_df: pd.DataFrame, json_path: str):
-    """يدمج الوظائف الجديدة مع القديمة (upsert باستخدام url) ويحفظ JSON واحد فقط."""
     now = datetime.now(timezone.utc).isoformat()
-
     existing_jobs = load_existing_jobs(json_path)
-    print(f"📂 عدد الوظائف الموجودة مسبقًا بالملف: {len(existing_jobs)}")
-
     new_records = new_df.to_dict(orient="records")
 
     added_count = 0
@@ -306,7 +221,7 @@ def merge_and_save_jobs(new_df: pd.DataFrame, json_path: str):
     for job in new_records:
         url = job.get("url")
         if not url:
-            continue  # نتجاهل أي سجل بدون رابط فريد
+            continue
 
         if url in existing_jobs:
             job["first_seen"] = existing_jobs[url].get("first_seen", now)
@@ -321,9 +236,8 @@ def merge_and_save_jobs(new_df: pd.DataFrame, json_path: str):
             added_count += 1
             processed_records.append(job)
 
-    print(f"➕ وظائف جديدة أُضيفت: {added_count}")
+    print(f"\n➕ وظائف جديدة أُضيفت: {added_count}")
     print(f"🔄 وظائف موجودة تم تحديثها: {updated_count}")
-    print(f"📊 إجمالي الوظائف بعد الدمج: {len(existing_jobs)}")
 
     final_list = list(existing_jobs.values())
 
@@ -331,19 +245,19 @@ def merge_and_save_jobs(new_df: pd.DataFrame, json_path: str):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(final_list, f, ensure_ascii=False, indent=2)
 
-    print(f"💾 تم حفظ JSON في: {json_path}")
-
+    print(f"💾 تم حفظ JSON محلياً في: {json_path}")
     return processed_records
 
 
 if __name__ == "__main__":
     df = get_jooble_jobs()
-    print(df[["title", "company", "location"]].head(20))
-
-    json_path = os.path.join(
-        os.path.dirname(__file__), "..", "data", "raw", "jooble_tech_jobs.json"
-    )
-    processed_jobs = merge_and_save_jobs(df, json_path)
-
-    if processed_jobs:
-        load_jobs_to_snowflake(processed_jobs)
+    
+    if not df.empty:
+        json_path = os.path.join(
+            os.path.dirname(__file__), "..", "data", "RAW", "jooble_tech_jobs.json"
+        )
+        processed_jobs = merge_and_save_jobs(df, json_path)
+        
+        upload_to_adls_gen2(processed_jobs, source_name="jooble")
+    else:
+        print("⚠️ لم يتم جلب أي وظائف مطابقة.")

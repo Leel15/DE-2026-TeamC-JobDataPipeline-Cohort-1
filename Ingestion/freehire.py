@@ -1,12 +1,15 @@
 import json
 import os
-import time
+import time 
 import requests
 import pandas as pd
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import snowflake.connector
+from datetime import datetime
 from dotenv import load_dotenv
+
+from azure.storage.filedatalake import DataLakeServiceClient
+
 load_dotenv()
 
 API_URL = "https://freehire.me/api/v1/jobs/search"
@@ -20,12 +23,11 @@ HEADERS = {
     "Referer": "https://freehire.me/?countries=sa",
 }
 
-TARGET_COUNT = 10
+TARGET_COUNT = 150
 
-# مسار ملف الـ JSON المحلي لفحص الروابط الموجودة مسبقاً
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
-RAW_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
+RAW_DIR = os.path.join(PROJECT_ROOT, "data", "RAW")
 JSON_PATH = os.path.join(RAW_DIR, "freehire_tech_jobs.json")
 
 
@@ -38,44 +40,6 @@ def load_existing_jobs():
         except Exception:
             pass
     return []
-
-
-def load_jobs_to_snowflake(jobs_list):
-    if not jobs_list:
-        return
-
-    conn = None
-    cursor = None
-    try:
-        conn = snowflake.connector.connect(
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            account=os.getenv("SNOWFLAFE_ACCOUNT"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
-            database=os.getenv("SNOWFLAKE_DATABASE"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA")
-                )
-        cursor = conn.cursor()
-
-        print(f"☁️ جاري إرسال {len(jobs_list)} وظيفة جديدة إلى جدول RAW_FREEHIRE_JOBS في Snowflake...")
-        insert_query = "INSERT INTO RAW_FREEHIRE_JOBS (RAW_PAYLOAD) SELECT PARSE_JSON(%s)"
-
-        for job in jobs_list:
-            json_str = json.dumps(job, ensure_ascii=False)
-            cursor.execute(insert_query, (json_str,))
-
-        conn.commit()
-        print("✅ تم رفع البيانات إلى Snowflake بنجاح!")
-
-    except Exception as e:
-        print(f"❌ خطأ أثناء الرفع لـ Snowflake: {e}")
-        if conn:
-            conn.rollback()
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 def create_resilient_session() -> requests.Session:
     """ينشئ session واحدة مع إعادة محاولة تلقائية عند أخطاء السيرفر المؤقتة."""
@@ -95,16 +59,47 @@ def create_resilient_session() -> requests.Session:
     return session
 
 
+def upload_to_adls_gen2(jobs_to_upload, source_name="freehire"):
+    if not jobs_to_upload:
+        print("✨ لا توجد وظائف جديدة لرفعها إلى Azure في هذه الجلسة.")
+        return
+
+    account_name = os.getenv("AZURE_STORAGE_ACCOUNT", "datajobpipline")
+    container_name = os.getenv("AZURE_STORAGE_CONTAINER", "data")
+    sas_token = os.getenv("AZURE_SAS_TOKEN")
+
+    if not sas_token:
+        print("⚠️ لم يتم العثور على AZURE_SAS_TOKEN في ملف .env، تعذر الرفع لـ Azure.")
+        return
+
+    try:
+        account_url = f"https://{account_name}.dfs.core.windows.net"
+        if not sas_token.startswith("?"):
+            sas_token = f"?{sas_token}"
+            
+        service_client = DataLakeServiceClient(account_url=f"{account_url}{sas_token}")
+        file_system_client = service_client.get_file_system_client(container_name)
+
+        # مسار مجلد اليوم الحالي
+        ingest_date = datetime.now().strftime("%Y-%m-%d")
+        remote_file_path = f"raw/{source_name}/ingest_date={ingest_date}/data.json"
+
+        # تحويل الوظائف الجديدة فقط إلى JSON
+        json_payload = json.dumps(jobs_to_upload, ensure_ascii=False, indent=2)
+
+        file_client = file_system_client.get_file_client(remote_file_path)
+        file_client.upload_data(json_payload, overwrite=True)
+
+        print(f"🚀 تم رفع الوظائف الجديدة ({len(jobs_to_upload)} وظيفة) بنجاح إلى Azure في المسار:")
+        print(f"   📂 {container_name}/{remote_file_path}")
+
+    except Exception as e:
+        print(f"❌ حدث خطأ أثناء الرفع إلى Azure ADLS Gen2: {e}")
+
+    
 def get_tech_jobs_50(target_count=TARGET_COUNT):
-    """
-    يسحب وظائف تقنية سعودية من FreeHire (الفلترة الأساسية تتم عبر
-    باراميترات الـ API نفسها: countries=sa, is_tech=tech).
-    لا يوجد هنا أي تنظيف عميق (لا تنظيف HTML من الوصف، لا معالجة إضافية)
-    — هذي العمليات تُطبَّق لاحقًا عبر Transformation/cleaning.py.
-    """
     session = create_resilient_session()
 
-    # 1. تحميل الوظائف القديمة واستخراج روابطها
     existing_jobs = load_existing_jobs()
     existing_urls = {job.get("source_url") for job in existing_jobs if job.get("source_url")}
     print(f"📊 عدد الوظائف الموجودة محلياً مسبقاً: {len(existing_jobs)}")
@@ -140,9 +135,10 @@ def get_tech_jobs_50(target_count=TARGET_COUNT):
             for item in raw_jobs:
                 job_url = item.get("url", "")
 
-                # 2. التحقق مما إذا كانت الوظيفة موجودة مسبقاً
                 if job_url in existing_urls:
                     continue
+
+                current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 record = {
                     "job_title": item.get("title", "غير محدد"),
@@ -152,9 +148,10 @@ def get_tech_jobs_50(target_count=TARGET_COUNT):
                     "posted_date": item.get("posted_at") or item.get("created_at", "غير محدد"),
                     "category": item.get("enrichment", {}).get("category", "tech"),
                     "skills": item.get("skills", []),
-                    "job_description": item.get("description", ""),  # خام كما هو (فيه HTML)، التنظيف لاحقًا
+                    "job_description": item.get("description", ""),
                     "source_url": job_url,
                     "original_source": item.get("source", "freehire"),
+                    "extracted_at": current_timestamp
                 }
                 new_fetched_jobs.append(record)
                 existing_urls.add(job_url)
@@ -177,22 +174,19 @@ def get_tech_jobs_50(target_count=TARGET_COUNT):
             break
 
     if not new_fetched_jobs:
-        print("✨ لا توجد وظائف جديدة، جميع الوظائف المسحوبة موجودة مسبقاً!")
+        print("✨ لا توجد وظائف جديدة، لم يتم رفع أي ملف جديد اليوم.")
         return
 
-    # دمج الوظائف القديمة مع الجديدة وحفظ الملف الكامل
     combined_jobs = existing_jobs + new_fetched_jobs
 
+    # 1. الحفظ المحلي (يحفظ الأرشيف كاملاً للرجوع له محلياً)
     os.makedirs(RAW_DIR, exist_ok=True)
     with open(JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(combined_jobs, f, ensure_ascii=False, indent=2)
 
-    print(f"\n🎯 اكتملت العملية بنجاح! إجمالي الوظائف المحفوظة: {len(combined_jobs)}")
-    print(f"📁 {JSON_PATH}")
+    print(f"\n🎯 اكتملت العملية بنجاح! إجمالي الوظائف المحفوظة محلياً: {len(combined_jobs)}")
 
-    # رفع الوظائف الجديدة فقط إلى Snowflake
-    if new_fetched_jobs:
-        load_jobs_to_snowflake(new_fetched_jobs)
+    upload_to_adls_gen2(new_fetched_jobs)
 
 
 if __name__ == "__main__":
