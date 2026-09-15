@@ -25,6 +25,27 @@ Job-Data-Pipeline/
 
 ---
 
+
+##📋 Phase 0: Source Inventory & Selection Reasoning
+
+As part of our initial project investigation phase, we evaluated multiple job platforms to establish a robust and comprehensive dataset for the Saudi technology market
+
+- **Tanqeeb**: Web scraping from Saudi Tanqeeb portal
+- **Jooble**: Official API integration
+- **JSearch**: RapidAPI provider
+- **FreeHire**: Direct API/Web endpoint
+- **Tapneo**: Local file imports
+
+  
+| Source | URL/Identifier | Collection Method | Format |
+|--------|---|---|---|
+| **Tanqeeb** | https://saudi.tanqeeb.com/s/jobs/IT-jobs | Web Scraping (SEO-friendly category browsing) | HTML / DOM Elements |
+| **Jooble** | Official Jooble API Endpoint | API with Key | JSON |
+| **JSearch** | RapidAPI (JSearch Provider) | API with Key | JSON |
+| **FreeHire** | FreeHire Platform Endpoint | API / Web Endpoint | JSON |
+| **Tapneo** | Local / Exported Data Source | File-based Source | CSV / JSON |
+
+
 ## 🚀 Getting Started
 
 ### **1. Clone the Repository**
